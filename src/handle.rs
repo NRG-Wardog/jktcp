@@ -246,7 +246,29 @@ impl AdapterHandle {
                     }
 
                     _ = crate::time::sleep(std::time::Duration::from_millis(250)), if has_pending_work => {
-                        let _ = adapter.write_buffer_flush().await;
+                        if let Err(e) = adapter.write_buffer_flush().await {
+                            for (hp, tx) in handles.drain() {
+                                let _ = tx.send(Err(e.kind().into()));
+                                let _ = adapter.close(hp).await;
+                            }
+                            break;
+                        }
+
+                        // A retransmission timeout changes connection state without
+                        // requiring another inbound packet. Wake blocked readers here.
+                        let mut timed_out = Vec::new();
+                        for (&hp, tx) in &handles {
+                            if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
+                                if kind != std::io::ErrorKind::UnexpectedEof {
+                                    let _ = tx.send(Err(std::io::Error::from(kind)));
+                                }
+                                timed_out.push(hp);
+                            }
+                        }
+                        for hp in timed_out {
+                            handles.remove(&hp);
+                            let _ = adapter.close(hp).await;
+                        }
                     }
                 }
             }
