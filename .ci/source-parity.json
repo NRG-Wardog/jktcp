@@ -1,0 +1,53 @@
+{
+  "owner": "jktcp",
+  "upstream_base": "e674e1eee6d5943e13b1eba0bd24a9dd0b2fa020",
+  "fork_commit": "072c8c977d46877b9c0ad25ef38b135ad59fb52f",
+  "branch": "migration/runtime-source-141776ba",
+  "behavior_differences": [],
+  "files": [
+    {
+      "path": "src/adapter.rs",
+      "upstream_sha256": "12399d17b16b349ee6aae88afdf2877e64df58e8b5a63328522e5030f2c37197",
+      "old_generated_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
+      "new_source_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
+      "mode": "0o644",
+      "subsystem": "Maintain zero window persist and retransmission behavior",
+      "commit": "ee364356f178d8ab6489fa1a88c188a9e44e8652",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/handle.rs",
+      "upstream_sha256": "afa85aad3dc99d69c4f7a32d5eb49fd5f93e0073cd2877c19bd0b45cd608c5af",
+      "old_generated_sha256": "66fbeef6afabcbf29bc16e37fc9c51761141d07fa1db4c0d112b09504a87f75c",
+      "new_source_sha256": "66fbeef6afabcbf29bc16e37fc9c51761141d07fa1db4c0d112b09504a87f75c",
+      "mode": "0o644",
+      "subsystem": "Maintain timer failure and reader wakeup behavior",
+      "commit": "f1db40ae6f0f94c9e6b85279e97ff118e989e34e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Cargo.lock",
+      "upstream_sha256": "3d31b87650fd8b8ddb039e5ccc8293ec47098f20bf2bbcc1a9c473618806d046",
+      "old_generated_sha256": "575d508c4e2c4967ec4cc53b0871e5a3efcda91b132e86cbb35327db34d60f73",
+      "new_source_sha256": "575d508c4e2c4967ec4cc53b0871e5a3efcda91b132e86cbb35327db34d60f73",
+      "mode": "0o644",
+      "subsystem": "Align the existing local jktcp lock identity",
+      "commit": "9976a22a73d119916d4b971a5e5004b353e37d4f",
+      "git_mode": "100644"
+    }
+  ],
+  "prepared_evidence_excluded": [],
+  "tests_run": [
+    "git diff --check",
+    "exact changed source byte and mode comparison"
+  ],
+  "tests_not_run": [
+    "Rust/Cargo build; cargo fmt and generated FFI headers"
+  ],
+  "source_parity_status": "exact_prepared_bytes_pass",
+  "metadata_files": [
+    "NOTICE-NRG-Wardog",
+    ".ci/source-parity.py",
+    ".ci/source-parity.json"
+  ]
+}
