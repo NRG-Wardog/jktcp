@@ -820,7 +820,10 @@ impl Adapter {
                         state.bytes_in_flight,
                         state.write_buffer.len()
                     ));
-                } else if old_window == 0 && state.peer_window > 0 && state.persist_sent_at.is_some() {
+                } else if old_window == 0
+                    && state.peer_window > 0
+                    && state.persist_sent_at.is_some()
+                {
                     transport_diag(&format!(
                         "[LOCKDOWN_DIAG] JKTCP_WINDOW_REOPENED hp={} peer_port={} window={} snd_una={} snd_nxt={} in_flight={} queued={}",
                         state.host_port,
@@ -1358,7 +1361,10 @@ mod tests {
             &[],
             &[],
         );
-        adapter.process_tcp_packet_from_payload(&reopen).await.unwrap();
+        adapter
+            .process_tcp_packet_from_payload(&reopen)
+            .await
+            .unwrap();
         adapter.write_buffer_flush().await.unwrap();
         let resumed = read_pkt(&mut test_rx).await;
         assert_eq!(resumed.payload, b"abc");

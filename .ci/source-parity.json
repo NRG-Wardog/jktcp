@@ -9,7 +9,7 @@
       "path": "src/adapter.rs",
       "upstream_sha256": "12399d17b16b349ee6aae88afdf2877e64df58e8b5a63328522e5030f2c37197",
       "old_generated_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
-      "new_source_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
+      "new_source_sha256": "57a5f51ef060f13533d99e2820af68dbf4325358c20d52e0752db79c543a98d3",
       "mode": "0o644",
       "subsystem": "Maintain zero window persist and retransmission behavior",
       "commit": "ee364356f178d8ab6489fa1a88c188a9e44e8652",
@@ -39,15 +39,37 @@
   "prepared_evidence_excluded": [],
   "tests_run": [
     "git diff --check",
-    "exact changed source byte and mode comparison"
+    "exact changed source byte and mode comparison",
+    "Rust 1.98.1 cargo fmt --check --manifest-path jktcp/Cargo.toml",
+    "all product bytes and modes equal independently formatted OLD generated source",
+    "Rust 1.98.1 cargo test --locked --manifest-path jktcp/Cargo.toml --lib -- --skip tests::local_tcp --skip tests::handle_speed: 14 passed, 2 filtered"
   ],
   "tests_not_run": [
-    "Rust/Cargo build; cargo fmt and generated FFI headers"
+    "macOS/iOS native build on the formatted owner commit"
   ],
-  "source_parity_status": "exact_prepared_bytes_pass",
+  "source_parity_status": "formatted_prepared_bytes_pass",
   "metadata_files": [
     "NOTICE-NRG-Wardog",
     ".ci/source-parity.py",
     ".ci/source-parity.json"
-  ]
+  ],
+  "formatting_transition": {
+    "previous_owner_commit": "82277a1f366e8d92e775d14212ff21621b25f3f3",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "rustfmt": "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
+    "command": "cargo fmt --manifest-path jktcp/Cargo.toml",
+    "source_basis": "Both the frozen OLD generated tree and the previous maintained owner were formatted independently with the pinned formatter; every product blob, symlink and gitlink matches afterward.",
+    "previous_status": "exact_prepared_bytes_pass",
+    "product_entries_compared": 9,
+    "changed_files": [
+      {
+        "path": "src/adapter.rs",
+        "old_generated_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
+        "formatted_sha256": "57a5f51ef060f13533d99e2820af68dbf4325358c20d52e0752db79c543a98d3",
+        "git_mode": "100644"
+      }
+    ],
+    "behavior_differences": []
+  }
 }
