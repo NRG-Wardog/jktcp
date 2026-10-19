@@ -173,6 +173,13 @@ pub struct Adapter {
     mss: usize,
     send_window: usize,
     udp_sockets: HashMap<u16, VecDeque<UdpDatagram>>,
+    /// IP packets waiting to be written to `peer`, oldest first. Writes go
+    /// through here because the adapter's futures are raced in `select!`s and
+    /// may be dropped at any await: a cancelled `write_all` would leave a
+    /// partial IP packet on the transport and desync the peer's framing.
+    outbox: VecDeque<Vec<u8>>,
+    /// How much of `outbox.front()` has already been written.
+    outbox_offset: usize,
 }
 
 impl Adapter {
@@ -189,6 +196,8 @@ impl Adapter {
             mss: DEFAULT_MSS,
             send_window: DEFAULT_SEND_WINDOW,
             udp_sockets: HashMap::new(),
+            outbox: VecDeque::new(),
+            outbox_offset: 0,
         }
     }
 
@@ -303,8 +312,8 @@ impl Adapter {
                 &[],
             );
             let ip = self.ip_wrap(&tcp);
-            self.peer.write_all(&ip).await?;
             self.log_packet(&ip)?;
+            self.send_packet(ip).await?;
             Ok(())
         } else {
             Err(std::io::Error::new(
@@ -413,6 +422,35 @@ impl Adapter {
         }
     }
 
+    /// Queue an IP packet and write out as much of the outbox as possible.
+    async fn send_packet(&mut self, ip: Vec<u8>) -> Result<(), std::io::Error> {
+        self.outbox.push_back(ip);
+        self.flush_outbox().await
+    }
+
+    /// Write queued packets to the transport. Cancel safe: each `write` either
+    /// completes and is recorded in `outbox_offset`, or writes nothing.
+    async fn flush_outbox(&mut self) -> Result<(), std::io::Error> {
+        if self.outbox.is_empty() {
+            return Ok(());
+        }
+        while let Some(packet) = self.outbox.front() {
+            let n = self.peer.write(&packet[self.outbox_offset..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    ErrorKind::WriteZero,
+                    "transport accepted no bytes",
+                ));
+            }
+            self.outbox_offset += n;
+            if self.outbox_offset == packet.len() {
+                self.outbox.pop_front();
+                self.outbox_offset = 0;
+            }
+        }
+        self.peer.flush().await
+    }
+
     // -----------------------------------------------------------------------
     // Flush / retransmit
     // -----------------------------------------------------------------------
@@ -422,6 +460,7 @@ impl Adapter {
     #[inline]
     pub(crate) fn has_pending_work(&self) -> bool {
         !self.dropped.is_empty()
+            || !self.outbox.is_empty()
             || self.states.values().any(|s| {
                 !s.unacked.is_empty()
                     || !s.write_buffer.is_empty()
@@ -433,6 +472,8 @@ impl Adapter {
     /// effective send window (`min(send_window, peer_window)`), then check
     /// for timed-out retransmissions.
     pub(crate) async fn write_buffer_flush(&mut self) -> Result<(), std::io::Error> {
+        // Finish writing anything a cancelled flush left behind first.
+        self.flush_outbox().await?;
         // Check retransmissions first so a timed-out connection is marked before
         // we attempt to send new data on it.
         self.check_retransmissions().await?;
@@ -557,8 +598,8 @@ impl Adapter {
                         self.ip_wrap(&tcp)
                     };
 
-                    self.peer.write_all(&ip).await?;
                     self.log_packet(&ip)?;
+                    self.send_packet(ip).await?;
                 }
                 Action::None => {}
             }
@@ -650,8 +691,8 @@ impl Adapter {
             data,
         );
         let ip = self.ip_wrap_proto(&udp, ProtocolNumber::Udp);
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     /// Drain all queued inbound UDP datagrams across every bound port.
@@ -812,8 +853,8 @@ impl Adapter {
             &[],
         );
         let ip = self.ip_wrap(&tcp);
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     async fn ack(&mut self, host_port: u16) -> Result<(), std::io::Error> {
@@ -840,8 +881,8 @@ impl Adapter {
         );
         let ip = self.ip_wrap(&tcp);
         let _ = state;
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     /// Send a PSH segment and record it in the unacked queue.
@@ -876,9 +917,8 @@ impl Adapter {
         let ip = self.ip_wrap(&tcp);
         let _ = state;
 
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)?;
-
+        // Record the segment before the await: the packet is queued either way, so
+        // a cancelled flush must not leave it to be sent again under a stale seq.
         if let Some(state) = self.states.get_mut(&host_port) {
             let len = data.len();
             state.bytes_in_flight += len;
@@ -891,7 +931,8 @@ impl Adapter {
             state.seq = state.seq.wrapping_add(len as u32);
         }
 
-        Ok(())
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     async fn read_ip_packet(&mut self) -> Result<(u8, Vec<u8>), std::io::Error> {
