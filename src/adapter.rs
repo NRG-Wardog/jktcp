@@ -772,6 +772,8 @@ impl Adapter {
                         && !res.flags.fin
                         && res.sequence_number.wrapping_add(1) == state.ack;
 
+                    let seg_end = res.sequence_number.wrapping_add(res.payload.len() as u32);
+
                     if is_keepalive {
                         debug!("keep-alive on hp={}", res.destination_port);
                         ack_me = Some(res.destination_port);
@@ -779,31 +781,36 @@ impl Adapter {
                         // ------------------------------------------------------
                         // Data segment: enforce in-order delivery.
                         // ------------------------------------------------------
-                        if res.sequence_number == state.ack {
-                            // Expected: accept.
-                            state.ack = state.ack.wrapping_add(res.payload.len() as u32);
-                            state.read_buffer.extend(&res.payload);
-                            ack_me = Some(res.destination_port);
+                        if seq_lte(res.sequence_number, state.ack) && seq_lt(state.ack, seg_end) {
+                            let skip = state.ack.wrapping_sub(res.sequence_number) as usize;
+                            if skip > 0 {
+                                debug!(
+                                    "overlapping data seq={} expected={} hp={}",
+                                    res.sequence_number, state.ack, res.destination_port
+                                );
+                            }
+                            state.read_buffer.extend(&res.payload[skip..]);
+                            state.ack = seg_end;
                         } else if seq_lt(res.sequence_number, state.ack) {
                             // Duplicate (already received): re-ACK, don't buffer.
                             debug!(
                                 "duplicate data seq={} expected={} hp={}",
                                 res.sequence_number, state.ack, res.destination_port
                             );
-                            ack_me = Some(res.destination_port);
                         } else {
-                            // Out-of-order: drop silently.
                             debug!(
                                 "out-of-order seq={} expected={} hp={}",
                                 res.sequence_number, state.ack, res.destination_port
                             );
                         }
+                        ack_me = Some(res.destination_port);
                     }
 
-                    // FIN: peer is closing; FIN consumes one sequence number.
                     if res.flags.fin {
-                        state.ack = state.ack.wrapping_add(1);
-                        state.status = ConnectionStatus::Error(ErrorKind::UnexpectedEof);
+                        if seg_end == state.ack {
+                            state.ack = state.ack.wrapping_add(1);
+                            state.status = ConnectionStatus::Error(ErrorKind::UnexpectedEof);
+                        }
                         ack_me = Some(res.destination_port);
                     }
                 }
@@ -1549,11 +1556,13 @@ mod tests {
             "out-of-order data must not be buffered"
         );
 
-        // No ACK should have been written to the transport.
-        let no_ack = tokio::time::timeout(Duration::from_millis(10), read_pkt(&mut test_rx)).await;
-        assert!(
-            no_ack.is_err(),
-            "out-of-order packet must not trigger an ACK"
+        // A duplicate ACK for what we do have tells the peer about the gap.
+        let dup_ack = read_pkt(&mut test_rx).await;
+        assert!(dup_ack.flags.ack);
+        assert_eq!(
+            dup_ack.acknowledgment_number,
+            PEER_ISN + 1,
+            "out-of-order packet must be answered with a duplicate ACK"
         );
     }
 
