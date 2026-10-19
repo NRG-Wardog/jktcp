@@ -87,6 +87,48 @@ enum HandleMessage {
     Die,
 }
 
+/// Push newly received bytes to each connection's channel, and close the ones
+/// that died, passing any error other than a clean EOF on to the reader.
+async fn deliver(
+    adapter: &mut crate::adapter::Adapter,
+    handles: &mut HashMap<u16, mpsc::UnboundedSender<Result<Vec<u8>, std::io::Error>>>,
+) {
+    let mut dead = Vec::new();
+    for (&hp, tx) in handles.iter() {
+        match adapter.uncache_all(hp) {
+            Ok(buf) if !buf.is_empty() => {
+                if tx.send(Ok(buf)).is_err() {
+                    dead.push(hp);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e));
+                dead.push(hp);
+            }
+            _ => {}
+        }
+    }
+    for hp in dead {
+        handles.remove(&hp);
+        let _ = adapter.close(hp).await;
+    }
+
+    let mut to_close = Vec::new();
+    for (&hp, tx) in handles.iter() {
+        if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
+            if kind != std::io::ErrorKind::UnexpectedEof {
+                let _ = tx.send(Err(std::io::Error::from(kind)));
+            }
+            to_close.push(hp);
+        }
+    }
+    for hp in to_close {
+        handles.remove(&hp);
+        // Best-effort close. For RST this just tidies state on our side
+        let _ = adapter.close(hp).await;
+    }
+}
+
 /// A cloneable, thread-safe handle to a background [`crate::adapter::Adapter`] task.
 ///
 /// Constructed via [`crate::adapter::Adapter::to_async_handle`]. Cheap to clone.
@@ -193,44 +235,6 @@ impl AdapterHandle {
                             break;
                         }
 
-                        // Push any newly available bytes to per-conn channels
-                        let mut dead = Vec::new();
-                        for (&hp, tx) in &handles {
-                            match adapter.uncache_all(hp) {
-                                Ok(buf) if !buf.is_empty() => {
-                                    if tx.send(Ok(buf)).is_err() {
-                                        dead.push(hp);
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Err(e));
-                                    dead.push(hp);
-                                }
-                                _ => {}
-                            }
-                        }
-                        for hp in dead {
-                            handles.remove(&hp);
-                            let _ = adapter.close(hp).await;
-                        }
-
-                        let mut to_close = Vec::new();
-                        for (&hp, tx) in &handles {
-                            if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
-                                if kind == std::io::ErrorKind::UnexpectedEof {
-                                    to_close.push(hp);
-                                } else {
-                                    let _ = tx.send(Err(std::io::Error::from(kind)));
-                                    to_close.push(hp);
-                                }
-                            }
-                        }
-                        for hp in to_close {
-                            handles.remove(&hp);
-                            // Best-effort close. For RST this just tidies state on our side
-                            let _ = adapter.close(hp).await;
-                        }
-
                         // Forward any inbound UDP datagrams to their bound port's channel.
                         if !udp_handles.is_empty() {
                             for dg in adapter.udp_drain() {
@@ -249,6 +253,8 @@ impl AdapterHandle {
                         let _ = adapter.write_buffer_flush().await;
                     }
                 }
+
+                deliver(&mut adapter, &mut handles).await;
             }
         });
 

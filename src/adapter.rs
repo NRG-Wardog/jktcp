@@ -562,6 +562,12 @@ impl Adapter {
                     warn!("hp={hp} timed out after {MAX_RETRIES} retransmissions; closing");
                     if let Some(state) = self.states.get_mut(&hp) {
                         state.status = ConnectionStatus::Error(ErrorKind::TimedOut);
+                        // Nothing will be sent on this connection again. Leaving the
+                        // segments queued would kill it again on every check and keep
+                        // reporting pending work forever.
+                        state.unacked.clear();
+                        state.bytes_in_flight = 0;
+                        state.write_buffer.clear();
                     }
                 }
                 Action::Retransmit { seq, data } => {
