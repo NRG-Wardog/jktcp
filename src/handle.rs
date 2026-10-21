@@ -23,8 +23,8 @@
 //! 1. **Incoming messages**: connect/send/pcap/close requests from callers.
 //! 2. **Incoming packets**: reads the next frame from the transport and updates
 //!    connection state.
-//! 3. **1 ms tick**: calls `write_buffer_flush`, which drains pending writes and
-//!    checks for retransmission timeouts.
+//! 3. **Pending-work-gated 250 ms timer**: drains pending writes and checks
+//!    retransmission timeouts without a continuous idle tick.
 //!
 //! The task exits when the last [`AdapterHandle`] is dropped or when
 //! [`AdapterHandle::close`] is called.
@@ -85,6 +85,48 @@ enum HandleMessage {
         res: oneshot::Sender<Result<(), std::io::Error>>,
     },
     Die,
+}
+
+/// Push newly received bytes to each connection's channel, and close the ones
+/// that died, passing any error other than a clean EOF on to the reader.
+async fn deliver(
+    adapter: &mut crate::adapter::Adapter,
+    handles: &mut HashMap<u16, mpsc::UnboundedSender<Result<Vec<u8>, std::io::Error>>>,
+) {
+    let mut dead = Vec::new();
+    for (&hp, tx) in handles.iter() {
+        match adapter.uncache_all(hp) {
+            Ok(buf) if !buf.is_empty() => {
+                if tx.send(Ok(buf)).is_err() {
+                    dead.push(hp);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e));
+                dead.push(hp);
+            }
+            _ => {}
+        }
+    }
+    for hp in dead {
+        handles.remove(&hp);
+        let _ = adapter.close(hp).await;
+    }
+
+    let mut to_close = Vec::new();
+    for (&hp, tx) in handles.iter() {
+        if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
+            if kind != std::io::ErrorKind::UnexpectedEof {
+                let _ = tx.send(Err(std::io::Error::from(kind)));
+            }
+            to_close.push(hp);
+        }
+    }
+    for hp in to_close {
+        handles.remove(&hp);
+        // Best-effort close. For RST this just tidies state on our side
+        let _ = adapter.close(hp).await;
+    }
 }
 
 /// A cloneable, thread-safe handle to a background [`crate::adapter::Adapter`] task.
@@ -193,43 +235,9 @@ impl AdapterHandle {
                             break;
                         }
 
-                        // Push any newly available bytes to per-conn channels
-                        let mut dead = Vec::new();
-                        for (&hp, tx) in &handles {
-                            match adapter.uncache_all(hp) {
-                                Ok(buf) if !buf.is_empty() => {
-                                    if tx.send(Ok(buf)).is_err() {
-                                        dead.push(hp);
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Err(e));
-                                    dead.push(hp);
-                                }
-                                _ => {}
-                            }
-                        }
-                        for hp in dead {
-                            handles.remove(&hp);
-                            let _ = adapter.close(hp).await;
-                        }
-
-                        let mut to_close = Vec::new();
-                        for (&hp, tx) in &handles {
-                            if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
-                                if kind == std::io::ErrorKind::UnexpectedEof {
-                                    to_close.push(hp);
-                                } else {
-                                    let _ = tx.send(Err(std::io::Error::from(kind)));
-                                    to_close.push(hp);
-                                }
-                            }
-                        }
-                        for hp in to_close {
-                            handles.remove(&hp);
-                            // Best-effort close. For RST this just tidies state on our side
-                            let _ = adapter.close(hp).await;
-                        }
+                        // Wake readers before a potentially blocked outgoing flush.
+                        // The common delivery below also covers all other branches.
+                        deliver(&mut adapter, &mut handles).await;
 
                         // Forward any inbound UDP datagrams to their bound port's channel.
                         if !udp_handles.is_empty() {
@@ -241,7 +249,7 @@ impl AdapterHandle {
                         }
 
                         // An ACK in that packet may have cleared `unacked` for some
-                        // connection; flush now instead of waiting up to 1ms for the tick.
+                        // connection; flush now instead of waiting for the retransmission timer.
                         let _ = adapter.write_buffer_flush().await;
                     }
 
@@ -253,24 +261,10 @@ impl AdapterHandle {
                             }
                             break;
                         }
-
-                        // A retransmission timeout changes connection state without
-                        // requiring another inbound packet. Wake blocked readers here.
-                        let mut timed_out = Vec::new();
-                        for (&hp, tx) in &handles {
-                            if let Ok(ConnectionStatus::Error(kind)) = adapter.get_status(hp) {
-                                if kind != std::io::ErrorKind::UnexpectedEof {
-                                    let _ = tx.send(Err(std::io::Error::from(kind)));
-                                }
-                                timed_out.push(hp);
-                            }
-                        }
-                        for hp in timed_out {
-                            handles.remove(&hp);
-                            let _ = adapter.close(hp).await;
-                        }
                     }
                 }
+
+                deliver(&mut adapter, &mut handles).await;
             }
         });
 

@@ -195,6 +195,15 @@ pub struct Adapter {
     mss: usize,
     send_window: usize,
     udp_sockets: HashMap<u16, VecDeque<UdpDatagram>>,
+    /// IP packets waiting to be written to `peer`, oldest first. Writes go
+    /// through here because the adapter's futures are raced in `select!`s and
+    /// may be dropped at any await: a cancelled `write_all` would leave a
+    /// partial IP packet on the transport and desync the peer's framing.
+    outbox: VecDeque<Vec<u8>>,
+    /// How much of `outbox.front()` has already been written.
+    outbox_offset: usize,
+    /// Bytes have reached the writer but its flush has not completed yet.
+    outbox_needs_flush: bool,
 }
 
 impl Adapter {
@@ -211,6 +220,9 @@ impl Adapter {
             mss: DEFAULT_MSS,
             send_window: DEFAULT_SEND_WINDOW,
             udp_sockets: HashMap::new(),
+            outbox: VecDeque::new(),
+            outbox_offset: 0,
+            outbox_needs_flush: false,
         }
     }
 
@@ -325,8 +337,8 @@ impl Adapter {
                 &[],
             );
             let ip = self.ip_wrap(&tcp);
-            self.peer.write_all(&ip).await?;
             self.log_packet(&ip)?;
+            self.send_packet(ip).await?;
             Ok(())
         } else {
             Err(std::io::Error::new(
@@ -435,6 +447,38 @@ impl Adapter {
         }
     }
 
+    /// Queue an IP packet and write out as much of the outbox as possible.
+    async fn send_packet(&mut self, ip: Vec<u8>) -> Result<(), std::io::Error> {
+        self.outbox.push_back(ip);
+        self.flush_outbox().await
+    }
+
+    /// Write queued packets to the transport. Cancel safe: each `write` either
+    /// completes and is recorded in `outbox_offset`, or writes nothing.
+    async fn flush_outbox(&mut self) -> Result<(), std::io::Error> {
+        if self.outbox.is_empty() && !self.outbox_needs_flush {
+            return Ok(());
+        }
+        while let Some(packet) = self.outbox.front() {
+            let n = self.peer.write(&packet[self.outbox_offset..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    ErrorKind::WriteZero,
+                    "transport accepted no bytes",
+                ));
+            }
+            self.outbox_needs_flush = true;
+            self.outbox_offset += n;
+            if self.outbox_offset == packet.len() {
+                self.outbox.pop_front();
+                self.outbox_offset = 0;
+            }
+        }
+        self.peer.flush().await?;
+        self.outbox_needs_flush = false;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Flush / retransmit
     // -----------------------------------------------------------------------
@@ -444,10 +488,12 @@ impl Adapter {
     #[inline]
     pub(crate) fn has_pending_work(&self) -> bool {
         !self.dropped.is_empty()
-            || self.states.values().any(|s| {
-                !s.unacked.is_empty()
-                    || !s.write_buffer.is_empty()
-                    || matches!(s.status, ConnectionStatus::WaitingForSyn)
+            || !self.outbox.is_empty()
+            || self.outbox_needs_flush
+            || self.states.values().any(|s| match s.status {
+                ConnectionStatus::WaitingForSyn => true,
+                ConnectionStatus::Connected => !s.unacked.is_empty() || !s.write_buffer.is_empty(),
+                ConnectionStatus::Error(_) => false,
             })
     }
 
@@ -455,6 +501,8 @@ impl Adapter {
     /// effective send window (`min(send_window, peer_window)`), then check
     /// for timed-out retransmissions.
     pub(crate) async fn write_buffer_flush(&mut self) -> Result<(), std::io::Error> {
+        // Finish writing anything a cancelled flush left behind first.
+        self.flush_outbox().await?;
         // Check retransmissions first so a timed-out connection is marked before
         // we attempt to send new data on it.
         self.check_retransmissions().await?;
@@ -469,7 +517,9 @@ impl Adapter {
                     let Some(state) = self.states.get(&hp) else {
                         break;
                     };
-                    if state.write_buffer.is_empty() {
+                    if !matches!(state.status, ConnectionStatus::Connected)
+                        || state.write_buffer.is_empty()
+                    {
                         break;
                     }
                     let cap = self.send_window.min(state.peer_window as usize);
@@ -485,11 +535,7 @@ impl Adapter {
                     Arc::from(v)
                 };
 
-                let chunk_len = chunk.len();
                 self.psh(chunk, hp).await?;
-                if let Some(state) = self.states.get_mut(&hp) {
-                    state.write_buffer.drain(..chunk_len);
-                }
             }
         }
 
@@ -580,8 +626,8 @@ impl Adapter {
                 &payload,
             );
             let ip = self.ip_wrap(&tcp);
-            self.peer.write_all(&ip).await?;
             self.log_packet(&ip)?;
+            self.send_packet(ip).await?;
             transport_diag(&format!(
                 "[LOCKDOWN_DIAG] JKTCP_ZERO_WINDOW_PROBE hp={} snd_nxt={}",
                 probe.host_port, probe.seq
@@ -607,20 +653,22 @@ impl Adapter {
             }
 
             let action = match self.states.get(&hp) {
-                Some(state) => match state.unacked.front() {
-                    Some(seg) if seg.is_timed_out() => {
-                        if seg.retries >= MAX_RETRIES {
-                            Action::Kill
-                        } else {
-                            Action::Retransmit {
-                                seq: seg.seq,
-                                data: seg.data.clone(),
+                Some(state) if matches!(state.status, ConnectionStatus::Connected) => {
+                    match state.unacked.front() {
+                        Some(seg) if seg.is_timed_out() => {
+                            if seg.retries >= MAX_RETRIES {
+                                Action::Kill
+                            } else {
+                                Action::Retransmit {
+                                    seq: seg.seq,
+                                    data: seg.data.clone(),
+                                }
                             }
                         }
+                        _ => Action::None,
                     }
-                    _ => Action::None,
-                },
-                None => Action::None,
+                }
+                _ => Action::None,
             };
 
             match action {
@@ -636,6 +684,12 @@ impl Adapter {
                             state.write_buffer.len()
                         ));
                         state.status = ConnectionStatus::Error(ErrorKind::TimedOut);
+                        // Nothing will be sent on this connection again. Leaving the
+                        // segments queued would kill it again on every check and keep
+                        // reporting pending work forever.
+                        state.unacked.clear();
+                        state.bytes_in_flight = 0;
+                        state.write_buffer.clear();
                     }
                 }
                 Action::Retransmit { seq, data } => {
@@ -672,8 +726,8 @@ impl Adapter {
                         self.ip_wrap(&tcp)
                     };
 
-                    self.peer.write_all(&ip).await?;
                     self.log_packet(&ip)?;
+                    self.send_packet(ip).await?;
                 }
                 Action::None => {}
             }
@@ -702,7 +756,7 @@ impl Adapter {
                 }
             }
             // Short timeout so retransmissions fire in the AdapterStream case
-            // (the AdapterHandle has a 1ms tick that calls write_buffer_flush directly).
+            // (AdapterHandle uses a pending-work-gated 250ms timer).
             _ = crate::time::sleep(std::time::Duration::from_millis(500)) => {
                 self.check_retransmissions().await
             }
@@ -765,8 +819,8 @@ impl Adapter {
             data,
         );
         let ip = self.ip_wrap_proto(&udp, ProtocolNumber::Udp);
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     /// Drain all queued inbound UDP datagrams across every bound port.
@@ -874,6 +928,8 @@ impl Adapter {
                         && !res.flags.fin
                         && res.sequence_number.wrapping_add(1) == state.ack;
 
+                    let seg_end = res.sequence_number.wrapping_add(res.payload.len() as u32);
+
                     if is_keepalive {
                         debug!("keep-alive on hp={}", res.destination_port);
                         ack_me = Some(res.destination_port);
@@ -881,31 +937,36 @@ impl Adapter {
                         // ------------------------------------------------------
                         // Data segment: enforce in-order delivery.
                         // ------------------------------------------------------
-                        if res.sequence_number == state.ack {
-                            // Expected: accept.
-                            state.ack = state.ack.wrapping_add(res.payload.len() as u32);
-                            state.read_buffer.extend(&res.payload);
-                            ack_me = Some(res.destination_port);
+                        if seq_lte(res.sequence_number, state.ack) && seq_lt(state.ack, seg_end) {
+                            let skip = state.ack.wrapping_sub(res.sequence_number) as usize;
+                            if skip > 0 {
+                                debug!(
+                                    "overlapping data seq={} expected={} hp={}",
+                                    res.sequence_number, state.ack, res.destination_port
+                                );
+                            }
+                            state.read_buffer.extend(&res.payload[skip..]);
+                            state.ack = seg_end;
                         } else if seq_lt(res.sequence_number, state.ack) {
                             // Duplicate (already received): re-ACK, don't buffer.
                             debug!(
                                 "duplicate data seq={} expected={} hp={}",
                                 res.sequence_number, state.ack, res.destination_port
                             );
-                            ack_me = Some(res.destination_port);
                         } else {
-                            // Out-of-order: drop silently.
                             debug!(
                                 "out-of-order seq={} expected={} hp={}",
                                 res.sequence_number, state.ack, res.destination_port
                             );
                         }
+                        ack_me = Some(res.destination_port);
                     }
 
-                    // FIN: peer is closing; FIN consumes one sequence number.
                     if res.flags.fin {
-                        state.ack = state.ack.wrapping_add(1);
-                        state.status = ConnectionStatus::Error(ErrorKind::UnexpectedEof);
+                        if seg_end == state.ack {
+                            state.ack = state.ack.wrapping_add(1);
+                            state.status = ConnectionStatus::Error(ErrorKind::UnexpectedEof);
+                        }
                         ack_me = Some(res.destination_port);
                     }
                 }
@@ -955,8 +1016,8 @@ impl Adapter {
             &[],
         );
         let ip = self.ip_wrap(&tcp);
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     async fn ack(&mut self, host_port: u16) -> Result<(), std::io::Error> {
@@ -983,8 +1044,8 @@ impl Adapter {
         );
         let ip = self.ip_wrap(&tcp);
         let _ = state;
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     /// Send a PSH segment and record it in the unacked queue.
@@ -1019,11 +1080,12 @@ impl Adapter {
         let ip = self.ip_wrap(&tcp);
         let _ = state;
 
-        self.peer.write_all(&ip).await?;
-        self.log_packet(&ip)?;
-
+        // Commit the application dequeue and sequence/unacked accounting together
+        // before the first await. The outbox owns the packet from that point on;
+        // cancellation must not resend the same application bytes at a new seq.
         if let Some(state) = self.states.get_mut(&host_port) {
             let len = data.len();
+            state.write_buffer.drain(..len);
             state.bytes_in_flight += len;
             state.unacked.push_back(UnackedSegment {
                 seq,
@@ -1034,7 +1096,8 @@ impl Adapter {
             state.seq = state.seq.wrapping_add(len as u32);
         }
 
-        Ok(())
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
     }
 
     async fn read_ip_packet(&mut self) -> Result<(u8, Vec<u8>), std::io::Error> {
@@ -1317,6 +1380,231 @@ mod tests {
     // ------------------------------------------------------------------
     // Tests
     // ------------------------------------------------------------------
+
+    /// A deterministic in-memory writer that stops after a chosen byte budget.
+    /// No socket, tunnel, device, or external process is used by these fixtures.
+    #[derive(Debug, Default)]
+    struct PausedWrites {
+        bytes: Vec<u8>,
+        budget: usize,
+        write_zero: bool,
+        pause_flush: bool,
+    }
+
+    #[derive(Debug)]
+    struct PausingTransport(Arc<std::sync::Mutex<PausedWrites>>);
+
+    impl AsyncRead for PausingTransport {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for PausingTransport {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut state = self.0.lock().unwrap();
+            if state.write_zero {
+                return Poll::Ready(Ok(0));
+            }
+            if state.budget == 0 {
+                return Poll::Pending;
+            }
+            let n = state.budget.min(buf.len());
+            state.bytes.extend_from_slice(&buf[..n]);
+            state.budget -= n;
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.0.lock().unwrap().pause_flush {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn pausing_adapter(budget: usize) -> (Adapter, Arc<std::sync::Mutex<PausedWrites>>, u16) {
+        let writes = Arc::new(std::sync::Mutex::new(PausedWrites {
+            budget,
+            ..Default::default()
+        }));
+        let mut adapter = Adapter::new(
+            Box::new(PausingTransport(writes.clone())),
+            IpAddr::V6(HOST_IP),
+            IpAddr::V6(PEER_IP),
+        );
+        let hp = 12345;
+        let mut state = ConnectionState::new(hp, PEER_PORT);
+        state.status = ConnectionStatus::Connected;
+        state.seq = 100;
+        state.ack = PEER_ISN + 1;
+        state.peer_window = u16::MAX as u32;
+        adapter.states.insert(hp, state);
+        (adapter, writes, hp)
+    }
+
+    #[tokio::test]
+    async fn cancelled_write_preserves_packet_and_dequeues_once() {
+        tokio::time::pause();
+        let (mut adapter, writes, hp) = pausing_adapter(17);
+        adapter.queue_send(b"abc", hp).unwrap();
+        {
+            let mut flush = Box::pin(adapter.write_buffer_flush());
+            assert!(matches!(futures::poll!(flush.as_mut()), Poll::Pending));
+        }
+        let packet = adapter.outbox.front().unwrap().clone();
+        assert_eq!(adapter.outbox_offset, 17);
+        assert_eq!(adapter.states[&hp].seq, 103);
+        assert_eq!(adapter.states[&hp].bytes_in_flight, 3);
+        assert_eq!(adapter.states[&hp].unacked.len(), 1);
+        assert!(adapter.states[&hp].write_buffer.is_empty());
+        assert!(adapter.has_pending_work());
+
+        writes.lock().unwrap().budget = usize::MAX;
+        adapter.write_buffer_flush().await.unwrap();
+        assert_eq!(writes.lock().unwrap().bytes, packet);
+        assert!(adapter.outbox.is_empty());
+        assert_eq!(adapter.outbox_offset, 0);
+        assert_eq!(adapter.states[&hp].seq, 103);
+        assert_eq!(adapter.states[&hp].unacked.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_transport_flush_is_resumed_without_duplicate_bytes() {
+        tokio::time::pause();
+        let (mut adapter, writes, hp) = pausing_adapter(usize::MAX);
+        writes.lock().unwrap().pause_flush = true;
+        adapter.queue_send(b"abc", hp).unwrap();
+        {
+            let mut flush = Box::pin(adapter.write_buffer_flush());
+            assert!(matches!(futures::poll!(flush.as_mut()), Poll::Pending));
+        }
+        let bytes = writes.lock().unwrap().bytes.clone();
+        assert!(!bytes.is_empty());
+        assert!(adapter.outbox.is_empty());
+        assert!(adapter.outbox_needs_flush);
+        assert!(adapter.has_pending_work());
+        assert!(adapter.states[&hp].write_buffer.is_empty());
+
+        writes.lock().unwrap().pause_flush = false;
+        adapter.write_buffer_flush().await.unwrap();
+        assert_eq!(writes.lock().unwrap().bytes, bytes);
+        assert!(!adapter.outbox_needs_flush);
+        assert_eq!(adapter.states[&hp].seq, 103);
+        assert_eq!(adapter.states[&hp].unacked.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_zero_window_probe_uses_outbox() {
+        tokio::time::pause();
+        let (mut adapter, writes, hp) = pausing_adapter(17);
+        adapter.states.get_mut(&hp).unwrap().peer_window = 0;
+        adapter.queue_send(b"abc", hp).unwrap();
+        adapter.write_buffer_flush().await.unwrap();
+        tokio::time::advance(Duration::from_millis(INITIAL_PERSIST_MS + 1)).await;
+        {
+            let mut flush = Box::pin(adapter.write_buffer_flush());
+            assert!(matches!(futures::poll!(flush.as_mut()), Poll::Pending));
+        }
+        let packet = adapter.outbox.front().unwrap().clone();
+        assert_eq!(adapter.outbox_offset, 17);
+        assert_eq!(adapter.states[&hp].seq, 100);
+        assert_eq!(adapter.states[&hp].write_buffer.len(), 3);
+        assert!(adapter.states[&hp].unacked.is_empty());
+
+        writes.lock().unwrap().budget = usize::MAX;
+        adapter.write_buffer_flush().await.unwrap();
+        assert_eq!(writes.lock().unwrap().bytes, packet);
+        assert!(adapter.outbox.is_empty());
+        assert_eq!(adapter.states[&hp].persist_retries, 1);
+        assert_eq!(adapter.states[&hp].write_buffer.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn write_zero_keeps_the_queued_packet() {
+        let (mut adapter, writes, hp) = pausing_adapter(usize::MAX);
+        writes.lock().unwrap().write_zero = true;
+        adapter.queue_send(b"abc", hp).unwrap();
+        let error = adapter.write_buffer_flush().await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WriteZero);
+        assert_eq!(adapter.outbox.len(), 1);
+        assert_eq!(adapter.outbox_offset, 0);
+        assert!(adapter.states[&hp].write_buffer.is_empty());
+        assert_eq!(adapter.states[&hp].seq, 103);
+    }
+
+    #[tokio::test]
+    async fn reset_connection_does_not_retransmit_or_send_queued_bytes() {
+        tokio::time::pause();
+        let (mut adapter, writes, hp) = pausing_adapter(usize::MAX);
+        adapter.queue_send(b"abc", hp).unwrap();
+        adapter.write_buffer_flush().await.unwrap();
+        let sent = writes.lock().unwrap().bytes.clone();
+        adapter.queue_send(b"def", hp).unwrap();
+        adapter.states.get_mut(&hp).unwrap().status =
+            ConnectionStatus::Error(ErrorKind::ConnectionReset);
+        tokio::time::advance(Duration::from_millis(INITIAL_RTO_MS + 1)).await;
+        adapter.write_buffer_flush().await.unwrap();
+        assert_eq!(writes.lock().unwrap().bytes, sent);
+        assert_eq!(adapter.states[&hp].seq, 103);
+        assert_eq!(adapter.states[&hp].write_buffer.len(), 3);
+        assert!(!adapter.has_pending_work());
+    }
+
+    #[tokio::test]
+    async fn overlapping_fin_waits_for_missing_prefix() {
+        let (mut adapter, _writes, hp) = pausing_adapter(usize::MAX);
+        let ack = PEER_ISN + 1;
+        let flags = TcpFlags {
+            ack: true,
+            fin: true,
+            ..Default::default()
+        };
+        adapter
+            .process_tcp_packet_from_payload(&tcp_seg(hp, ack + 3, 100, flags.clone(), b"def"))
+            .await
+            .unwrap();
+        assert_eq!(adapter.states[&hp].ack, ack);
+        assert_eq!(adapter.states[&hp].status, ConnectionStatus::Connected);
+        assert!(adapter.states[&hp].read_buffer.is_empty());
+
+        adapter
+            .process_tcp_packet_from_payload(&tcp_seg(
+                hp,
+                ack,
+                100,
+                TcpFlags {
+                    ack: true,
+                    ..Default::default()
+                },
+                b"abc",
+            ))
+            .await
+            .unwrap();
+        adapter
+            .process_tcp_packet_from_payload(&tcp_seg(hp, ack, 100, flags, b"abcdef"))
+            .await
+            .unwrap();
+        assert_eq!(adapter.states[&hp].read_buffer, b"abcdef");
+        assert_eq!(adapter.states[&hp].ack, ack + 7);
+        assert_eq!(
+            adapter.states[&hp].status,
+            ConnectionStatus::Error(ErrorKind::UnexpectedEof)
+        );
+    }
 
     #[tokio::test]
     async fn zero_window_persist_probe_recovers_lost_window_update() {
@@ -1704,11 +1992,13 @@ mod tests {
             "out-of-order data must not be buffered"
         );
 
-        // No ACK should have been written to the transport.
-        let no_ack = tokio::time::timeout(Duration::from_millis(10), read_pkt(&mut test_rx)).await;
-        assert!(
-            no_ack.is_err(),
-            "out-of-order packet must not trigger an ACK"
+        // A duplicate ACK for what we do have tells the peer about the gap.
+        let dup_ack = read_pkt(&mut test_rx).await;
+        assert!(dup_ack.flags.ack);
+        assert_eq!(
+            dup_ack.acknowledgment_number,
+            PEER_ISN + 1,
+            "out-of-order packet must be answered with a duplicate ACK"
         );
     }
 

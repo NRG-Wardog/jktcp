@@ -1,75 +1,178 @@
 {
+  "schema_version": 2,
   "owner": "jktcp",
-  "upstream_base": "e674e1eee6d5943e13b1eba0bd24a9dd0b2fa020",
-  "fork_commit": "072c8c977d46877b9c0ad25ef38b135ad59fb52f",
-  "branch": "migration/runtime-source-141776ba",
-  "behavior_differences": [],
+  "upstream_base": "7df57dc59b47ec72fb5dc251fbe9344b0647246b",
+  "previous_fork_commit": "32c0210f286b4fd16efe05be4f57167a9d94459b",
+  "upstream_sync": {
+    "from_base": "74fb9936f97abfa79f41e4d6b0e9472c8446230a",
+    "upstream_version": "0.1.8",
+    "expected_merge_parents": [
+      "32c0210f286b4fd16efe05be4f57167a9d94459b",
+      "7df57dc59b47ec72fb5dc251fbe9344b0647246b"
+    ],
+    "full_history_required": true
+  },
+  "migration_provenance": {
+    "previous_manifest_commit": "32c0210f286b4fd16efe05be4f57167a9d94459b",
+    "previous_manifest_path": ".ci/source-parity.json",
+    "previous_manifest_sha256": "50fdd7a5edb1379027abe9537b90fc2fb9d4a3ef17b510653478e2968f816a73",
+    "notice": "NOTICE-NRG-Wardog",
+    "previous_test_results_apply_only_to_previous_owner": true
+  },
+  "behavior_differences": [
+    "Integrate the exact jkcoxson 0.1.8 upstream packet-write queue, overlapping/out-of-order ACK handling, FIN sequencing, and shared reader-close delivery.",
+    "Preserve NRG zero-window persist/backoff, lost-window-update recovery, timeout diagnostics, fatal timer-flush propagation, and event-driven idle behavior.",
+    "Route custom zero-window probes through the single cancellation-safe outbox; atomically dequeue application bytes with sequence and unacked bookkeeping before the first await.",
+    "Retain a pending transport-flush flag across cancellation and include it in pending work until flush completes.",
+    "Deliver inbound data/errors before potentially blocked outgoing flushing; do not retransmit or dequeue new data on errored connections or keep their idle timer active.",
+    "Normalize the source-owned jktcp package/lock root identity to 0.1.8 without changing dependency declarations or resolved dependency entries; Cargo --locked verification is pending."
+  ],
   "files": [
     {
-      "path": "src/adapter.rs",
-      "upstream_sha256": "12399d17b16b349ee6aae88afdf2877e64df58e8b5a63328522e5030f2c37197",
-      "old_generated_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
-      "new_source_sha256": "57a5f51ef060f13533d99e2820af68dbf4325358c20d52e0752db79c543a98d3",
-      "mode": "0o644",
-      "subsystem": "Maintain zero window persist and retransmission behavior",
-      "commit": "ee364356f178d8ab6489fa1a88c188a9e44e8652",
-      "git_mode": "100644"
-    },
-    {
-      "path": "src/handle.rs",
-      "upstream_sha256": "afa85aad3dc99d69c4f7a32d5eb49fd5f93e0073cd2877c19bd0b45cd608c5af",
-      "old_generated_sha256": "66fbeef6afabcbf29bc16e37fc9c51761141d07fa1db4c0d112b09504a87f75c",
-      "new_source_sha256": "66fbeef6afabcbf29bc16e37fc9c51761141d07fa1db4c0d112b09504a87f75c",
-      "mode": "0o644",
-      "subsystem": "Maintain timer failure and reader wakeup behavior",
-      "commit": "f1db40ae6f0f94c9e6b85279e97ff118e989e34e",
-      "git_mode": "100644"
+      "path": ".gitignore",
+      "git_mode": "100644",
+      "new_source_blob": "ea8c4bf7f35f6f77f75d92ad8ce8349f6e81ddba",
+      "new_source_sha256": "44c92e3a70ad3307b7056871c2bdb096d8bfa9373f5bf06a79bb6324a20ff2fb",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "ea8c4bf7f35f6f77f75d92ad8ce8349f6e81ddba",
+      "upstream_sha256": "44c92e3a70ad3307b7056871c2bdb096d8bfa9373f5bf06a79bb6324a20ff2fb",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "ea8c4bf7f35f6f77f75d92ad8ce8349f6e81ddba",
+      "previous_owner_sha256": "44c92e3a70ad3307b7056871c2bdb096d8bfa9373f5bf06a79bb6324a20ff2fb"
     },
     {
       "path": "Cargo.lock",
-      "upstream_sha256": "3d31b87650fd8b8ddb039e5ccc8293ec47098f20bf2bbcc1a9c473618806d046",
-      "old_generated_sha256": "575d508c4e2c4967ec4cc53b0871e5a3efcda91b132e86cbb35327db34d60f73",
-      "new_source_sha256": "575d508c4e2c4967ec4cc53b0871e5a3efcda91b132e86cbb35327db34d60f73",
-      "mode": "0o644",
-      "subsystem": "Align the existing local jktcp lock identity",
-      "commit": "9976a22a73d119916d4b971a5e5004b353e37d4f",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "new_source_blob": "4bc745c4cc6c2015a14863d75e751e7bb909af46",
+      "new_source_sha256": "70bc566de22be27686c4277ebf3337e7128e50cf2352159d07fdf8820733e503",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "2be878f865ccfed66e365057d8785b4fb743eda1",
+      "upstream_sha256": "03c4ea8d1ed83ab2e6b0e10755a6ee05f68ee1e6df83bf58a5000a59c8da43d7",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "e4c1525799b502e9409ea27aa5c6204ae710bb33",
+      "previous_owner_sha256": "575d508c4e2c4967ec4cc53b0871e5a3efcda91b132e86cbb35327db34d60f73"
+    },
+    {
+      "path": "Cargo.toml",
+      "git_mode": "100644",
+      "new_source_blob": "d1e3abf6fada9a1d199cf9ccc7ee95acfa61f563",
+      "new_source_sha256": "e20113e6b83e9621f103916a2e39766801cc7f01947ad53192d3a1a9332bdbd8",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "d1e3abf6fada9a1d199cf9ccc7ee95acfa61f563",
+      "upstream_sha256": "e20113e6b83e9621f103916a2e39766801cc7f01947ad53192d3a1a9332bdbd8",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "216dba717bc397beb603a96ccd562b6912acbcc7",
+      "previous_owner_sha256": "201602ea80f7d7f4316f7aa30119482f0331d6a5cb786cab1b56c5596f13673f"
+    },
+    {
+      "path": "LICENSE",
+      "git_mode": "100644",
+      "new_source_blob": "5bbc76b9e127df639f6bef6b63f48535c8a10757",
+      "new_source_sha256": "e7634e53e321c7af1589001e136abba3aab053283c2362fbb5d5cc54f7432d4f",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "5bbc76b9e127df639f6bef6b63f48535c8a10757",
+      "upstream_sha256": "e7634e53e321c7af1589001e136abba3aab053283c2362fbb5d5cc54f7432d4f",
+      "previous_owner_git_mode": null,
+      "previous_owner_blob": null,
+      "previous_owner_sha256": null
+    },
+    {
+      "path": "README.md",
+      "git_mode": "100644",
+      "new_source_blob": "14f0c229e3cfcdddb3d8d8fbc2b7c4f01d892882",
+      "new_source_sha256": "71fe676353db5fd8a338c8cef6d21037ff0399ea01e94ed231663f5fd6f01c9a",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "14f0c229e3cfcdddb3d8d8fbc2b7c4f01d892882",
+      "upstream_sha256": "71fe676353db5fd8a338c8cef6d21037ff0399ea01e94ed231663f5fd6f01c9a",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "14f0c229e3cfcdddb3d8d8fbc2b7c4f01d892882",
+      "previous_owner_sha256": "71fe676353db5fd8a338c8cef6d21037ff0399ea01e94ed231663f5fd6f01c9a"
+    },
+    {
+      "path": "src/adapter.rs",
+      "git_mode": "100644",
+      "new_source_blob": "5a74ff91c3660b98bb2b52c7424063b57f947194",
+      "new_source_sha256": "39680ac3eb2ecebdadafd70c11903973885330b90ac9c1893de94b800af301ea",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "9096304766568b017eaf279bbb52dd6292aabf6b",
+      "upstream_sha256": "a90d0ded6d40667b63fd800608f33119dd22582402d2d18a57fcccad39f3f7c9",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "04f4a21ff91dcf5efb3f5f04c7810300b304d829",
+      "previous_owner_sha256": "57a5f51ef060f13533d99e2820af68dbf4325358c20d52e0752db79c543a98d3"
+    },
+    {
+      "path": "src/handle.rs",
+      "git_mode": "100644",
+      "new_source_blob": "38afb0f37275799a7a76401bbcb5efa7a8bbe74f",
+      "new_source_sha256": "ab6e88ac3a6354852e41b208d4151df34bd73c1b27e827475b9746bf1edee601",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "64590775575a91d440b78207b6dd8081d7d2682f",
+      "upstream_sha256": "d64b6beba5db938c6383defd981e84461ba0f1f4c239d6aa5e317f2d019e9270",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "f3e11191f1693bd4810d16991dc04f63131ded40",
+      "previous_owner_sha256": "66fbeef6afabcbf29bc16e37fc9c51761141d07fa1db4c0d112b09504a87f75c"
+    },
+    {
+      "path": "src/lib.rs",
+      "git_mode": "100644",
+      "new_source_blob": "247fe4ef336f462923225d743ab8c48f6ae1712f",
+      "new_source_sha256": "28b2c5efcbf0a4626f072f96df51322a12ea04d9c24e5ce882ea96c4660837cc",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "247fe4ef336f462923225d743ab8c48f6ae1712f",
+      "upstream_sha256": "28b2c5efcbf0a4626f072f96df51322a12ea04d9c24e5ce882ea96c4660837cc",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "247fe4ef336f462923225d743ab8c48f6ae1712f",
+      "previous_owner_sha256": "28b2c5efcbf0a4626f072f96df51322a12ea04d9c24e5ce882ea96c4660837cc"
+    },
+    {
+      "path": "src/packets.rs",
+      "git_mode": "100644",
+      "new_source_blob": "abbe03876d5b0a28125759e4b3197d5bb66f8746",
+      "new_source_sha256": "f9eea859110e5c364800a22c2aeb06cade460227ee4da00d2433db01c351100a",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "abbe03876d5b0a28125759e4b3197d5bb66f8746",
+      "upstream_sha256": "f9eea859110e5c364800a22c2aeb06cade460227ee4da00d2433db01c351100a",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "abbe03876d5b0a28125759e4b3197d5bb66f8746",
+      "previous_owner_sha256": "f9eea859110e5c364800a22c2aeb06cade460227ee4da00d2433db01c351100a"
+    },
+    {
+      "path": "src/stream.rs",
+      "git_mode": "100644",
+      "new_source_blob": "e4635af154fd8898d7f1652ee66bb0bbe93b6b2a",
+      "new_source_sha256": "ae4607aa71e3604af9b2191f838056f256de1e4b64113d8312a974a048e42d8c",
+      "upstream_git_mode": "100644",
+      "upstream_blob": "e4635af154fd8898d7f1652ee66bb0bbe93b6b2a",
+      "upstream_sha256": "ae4607aa71e3604af9b2191f838056f256de1e4b64113d8312a974a048e42d8c",
+      "previous_owner_git_mode": "100644",
+      "previous_owner_blob": "e4635af154fd8898d7f1652ee66bb0bbe93b6b2a",
+      "previous_owner_sha256": "ae4607aa71e3604af9b2191f838056f256de1e4b64113d8312a974a048e42d8c"
     }
   ],
-  "prepared_evidence_excluded": [],
-  "tests_run": [
-    "git diff --check",
-    "exact changed source byte and mode comparison",
-    "Rust 1.98.1 cargo fmt --check --manifest-path jktcp/Cargo.toml",
-    "all product bytes and modes equal independently formatted OLD generated source",
-    "Rust 1.98.1 cargo test --locked --manifest-path jktcp/Cargo.toml --lib -- --skip tests::local_tcp --skip tests::handle_speed: 14 passed, 2 filtered"
-  ],
-  "tests_not_run": [
-    "macOS/iOS native build on the formatted owner commit"
-  ],
-  "source_parity_status": "formatted_prepared_bytes_pass",
   "metadata_files": [
     "NOTICE-NRG-Wardog",
     ".ci/source-parity.py",
-    ".ci/source-parity.json"
+    ".ci/source-parity.json",
+    ".ci/test-source-parity.py"
   ],
-  "formatting_transition": {
-    "previous_owner_commit": "82277a1f366e8d92e775d14212ff21621b25f3f3",
-    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
-    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
-    "rustfmt": "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
-    "command": "cargo fmt --manifest-path jktcp/Cargo.toml",
-    "source_basis": "Both the frozen OLD generated tree and the previous maintained owner were formatted independently with the pinned formatter; every product blob, symlink and gitlink matches afterward.",
-    "previous_status": "exact_prepared_bytes_pass",
-    "product_entries_compared": 9,
-    "changed_files": [
-      {
-        "path": "src/adapter.rs",
-        "old_generated_sha256": "d3555e16174a3b3539ec2fe6648ea1d9006ef4590fb6ac0436bbb11c1bb81d63",
-        "formatted_sha256": "57a5f51ef060f13533d99e2820af68dbf4325358c20d52e0752db79c543a98d3",
-        "git_mode": "100644"
-      }
-    ],
-    "behavior_differences": []
-  }
+  "lock_identity_transition": {
+    "previous_owner_version": "0.1.6",
+    "upstream_manifest_version": "0.1.8",
+    "upstream_committed_lock_root_version": "0.0.0",
+    "candidate_version": "0.1.8",
+    "dependency_entries_changed": false,
+    "cargo_resolver_executed": false,
+    "admission": "Pending actual cargo --locked compile-only CI; no claim of resolver success."
+  },
+  "tests_run": [
+    "Verified exact fetched Git blob IDs and reconstructed complete base, previous-owner and ultimate-upstream tree IDs.",
+    "18 source-owned Python parity-negative/source-invariant checks passed with normal Python and optimized Python; no Rust/native code executed.",
+    "Static review of adapter/handle cancellation, persist, reset/FIN and reader-wakeup transitions; six new deterministic Rust fixtures authored, not executed."
+  ],
+  "tests_not_run": [
+    "Candidate commit/full-history verifier: candidate is not published or committed locally.",
+    "Cargo resolver, cargo check/build/test, rustfmt and native linking: no installed Rust toolchain used.",
+    "Rust regression fixtures, native fixtures, iOS/macOS/device execution, pairing or sign-in runtime validation."
+  ],
+  "source_parity_status": "reviewed_sync_candidate_pending_commit_parity_validation"
 }
